@@ -47,6 +47,7 @@ static int arm64_vtop_3level_16k(ulong, ulong, physaddr_t *, int);
 static int arm64_vtop_4level_16k(ulong, ulong, physaddr_t *, int);
 static int arm64_vtop_3level_4k(ulong, ulong, physaddr_t *, int);
 static int arm64_vtop_4level_4k(ulong, ulong, physaddr_t *, int);
+static int arm64_vtop_5level_4k(ulong, ulong, physaddr_t *, int);
 static ulong arm64_get_task_pgd(ulong);
 static void arm64_irq_stack_init(void);
 static void arm64_overflow_stack_init(void);
@@ -93,11 +94,13 @@ static void arm64_set_process_stack(struct bt_info *);
 static int arm64_get_kvaddr_ranges(struct vaddr_range *);
 static void arm64_get_crash_notes(void);
 static void arm64_calc_VA_BITS(void);
+static void arm64_get_lpa2_is_enabled(void);
 static int arm64_is_uvaddr(ulong, struct task_context *);
 static void arm64_calc_KERNELPACMASK(void);
 static void arm64_recalc_KERNELPACMASK(void);
 static int arm64_get_vmcoreinfo(unsigned long *vaddr, const char *label, int base);
 static ulong arm64_set_irq_stack_size(void);
+static ulong PTE_TO_PHYS(ulong pteval);
 
 struct kernel_range {
 	unsigned long modules_vaddr, modules_end;
@@ -330,6 +333,7 @@ arm64_init(int when)
 		arm64_get_struct_page_size(ms);
 		arm64_calc_VA_BITS();
 		arm64_calc_KERNELPACMASK();
+		arm64_get_lpa2_is_enabled();
 
 		/* vabits_actual introduced after mm flip, so it should be flipped layout */
 		if (ms->VA_BITS_ACTUAL) {
@@ -392,6 +396,27 @@ arm64_init(int when)
 		switch (machdep->pagesize)
 		{
 		case 4096:
+			if (machdep->machspec->VA_BITS == 52) {
+				machdep->flags |= VM_L5_4K;
+				if (!machdep->ptrs_per_pgd)
+					machdep->ptrs_per_pgd = PTRS_PER_PGD_L5_4K;
+				if ((machdep->pgd =
+				    (char *)malloc(machdep->ptrs_per_pgd * 8)) == NULL)
+					error(FATAL, "cannot malloc pgd space.");
+				if ((machdep->machspec->p4d =
+				    (char *)malloc(PTRS_PER_P4D_L5_4K * 8)) == NULL)
+					error(FATAL, "cannot malloc p4d space.");
+				if ((machdep->pud =
+				    (char *)malloc(PTRS_PER_PUD_L5_4K * 8)) == NULL)
+					error(FATAL, "cannot malloc pud space.");
+				if ((machdep->pmd =
+				    (char *)malloc(PTRS_PER_PMD_L5_4K * 8)) == NULL)
+					error(FATAL, "cannot malloc pmd space.");
+				if ((machdep->ptbl =
+				    (char *)malloc(PTRS_PER_PTE_L5_4K * 8)) == NULL)
+					error(FATAL, "cannot malloc ptbl space.");
+				break;
+			}
 			machdep->ptrs_per_pgd = PTRS_PER_PGD_L3_4K;
 			if ((machdep->pgd = 
 			    (char *)malloc(PTRS_PER_PGD_L3_4K * 8)) == NULL)
@@ -412,6 +437,7 @@ arm64_init(int when)
 			if ((machdep->ptbl = 
 			    (char *)malloc(PTRS_PER_PTE_L3_4K * 8)) == NULL)
 				error(FATAL, "cannot malloc ptbl space.");
+			machdep->machspec->p4d = NULL; /* not used */
 			break;
 
 		case 16384:
@@ -461,6 +487,7 @@ arm64_init(int when)
 			} else {
 				error(FATAL, "Do not support 52 bits, 4-level for 16K page now.");
 			}
+			machdep->machspec->p4d = NULL; /* not used */
 			break;
 
 		case 65536:
@@ -504,6 +531,7 @@ arm64_init(int when)
 					error(FATAL, "cannot malloc ptbl space.");
 				machdep->pmd = NULL;  /* not used */
 			}
+			machdep->machspec->p4d = NULL;  /* not used */
 			machdep->pud = NULL;  /* not used */
 			break;
 
@@ -516,6 +544,7 @@ arm64_init(int when)
 		}
 
 		machdep->last_pgd_read = 0;
+		machdep->machspec->last_p4d_read = 0;
 		machdep->last_pud_read = 0;
 		machdep->last_pmd_read = 0;
 		machdep->last_ptbl_read = 0;
@@ -1159,6 +1188,8 @@ arm64_dump_machdep_table(ulong arg)
 		"arm64_vtop_3level_4k" :
 		machdep->flags & VM_L4_4K ?
 		"arm64_vtop_4level_4k" :
+		machdep->flags & VM_L5_4K ?
+		"arm64_vtop_5level_4k" :
 		machdep->flags & VM_L2_16K ?
 		"arm64_vtop_2level_16k" :
 		machdep->flags & VM_L3_16K ?
@@ -1172,6 +1203,8 @@ arm64_dump_machdep_table(ulong arg)
 		"arm64_vtop_3level_4k" :
 		machdep->flags & VM_L4_4K ?
 		"arm64_vtop_4level_4k" :
+		machdep->flags & VM_L5_4K ?
+		"arm64_vtop_5level_4k" :
 		machdep->flags & VM_L2_16K ?
 		"arm64_vtop_2level_16k" :
 		machdep->flags & VM_L3_16K ?
@@ -1211,11 +1244,16 @@ arm64_dump_machdep_table(ulong arg)
         fprintf(fp, "    get_xendump_regs: (n/a)\n");
 	fprintf(fp, "   line_number_hooks: (not used)\n");
 	fprintf(fp, "       last_pgd_read: %lx\n", machdep->last_pgd_read);
-	fprintf(fp, "       last_pud_read: ");
-	if ((!(machdep->flags & VM_L4_4K)) && (!(machdep->flags & VM_L4_16K)))
-		fprintf(fp, "(not used)\n");
+	fprintf(fp, "       last_p4d_read: ");
+	if (machdep->flags & VM_L5_4K)
+		fprintf(fp, "%lx\n", machdep->machspec->last_p4d_read);
 	else
+		fprintf(fp, "(not used)\n");
+	fprintf(fp, "       last_pud_read: ");
+	if (((machdep->flags & VM_L4_4K)) || ((machdep->flags & VM_L4_16K)) || (machdep->flags & VM_L5_4K))
 		fprintf(fp, "%lx\n", machdep->last_pud_read);
+	else
+		fprintf(fp, "(not used)\n");
 	fprintf(fp, "       last_pmd_read: ");
 	if ((machdep->flags & VM_L2_64K) || (machdep->flags & VM_L2_16K))
 		fprintf(fp, "(not used)\n");
@@ -1224,6 +1262,7 @@ arm64_dump_machdep_table(ulong arg)
 	fprintf(fp, "      last_ptbl_read: %lx\n", machdep->last_ptbl_read);
 	fprintf(fp, " clear_machdep_cache: arm64_clear_machdep_cache()\n");
 	fprintf(fp, "                 pgd: %lx\n", (ulong)machdep->pgd);
+	fprintf(fp, "                 p4d: %lx\n", (ulong)machdep->machspec->p4d);
 	fprintf(fp, "                 pud: %lx\n", (ulong)machdep->pud);
 	fprintf(fp, "                 pmd: %lx\n", (ulong)machdep->pmd);
 	fprintf(fp, "                ptbl: %lx\n", (ulong)machdep->ptbl);
@@ -1257,6 +1296,7 @@ arm64_dump_machdep_table(ulong arg)
 		fprintf(fp, "%lx\n", ms->CONFIG_ARM64_KERNELPACMASK);
 	else
 		fprintf(fp, "(unused)\n");
+	fprintf(fp, "       lpa2_is_enabled: %ld\n", (ulong)ms->lpa2_is_enabled);
 	fprintf(fp, "         userspace_top: %016lx\n", ms->userspace_top);
 	fprintf(fp, "           page_offset: %016lx\n", ms->page_offset);
 	fprintf(fp, "    vmalloc_start_addr: %016lx\n", ms->vmalloc_start_addr);
@@ -1866,7 +1906,7 @@ arm64_kvtop(struct task_context *tc, ulong kvaddr, physaddr_t *paddr, int verbos
 	kernel_pgd = vt->kernel_pgd[0];
 	*paddr = 0;
 
-	switch (machdep->flags & (VM_L2_64K|VM_L3_64K|VM_L3_4K|VM_L4_4K|VM_L2_16K|VM_L3_16K|VM_L4_16K))
+	switch (machdep->flags & (VM_L2_64K|VM_L3_64K|VM_L3_4K|VM_L4_4K|VM_L2_16K|VM_L3_16K|VM_L4_16K|VM_L5_4K))
 	{
 	case VM_L2_64K:
 		return arm64_vtop_2level_64k(kernel_pgd, kvaddr, paddr, verbose);
@@ -1876,6 +1916,8 @@ arm64_kvtop(struct task_context *tc, ulong kvaddr, physaddr_t *paddr, int verbos
 		return arm64_vtop_3level_4k(kernel_pgd, kvaddr, paddr, verbose);
 	case VM_L4_4K:
 		return arm64_vtop_4level_4k(kernel_pgd, kvaddr, paddr, verbose);
+	case VM_L5_4K:
+		return arm64_vtop_5level_4k(kernel_pgd, kvaddr, paddr, verbose);
 	case VM_L2_16K:
 		return arm64_vtop_2level_16k(kernel_pgd, kvaddr, paddr, verbose);
 	case VM_L3_16K:
@@ -1897,7 +1939,7 @@ arm64_uvtop(struct task_context *tc, ulong uvaddr, physaddr_t *paddr, int verbos
 
 	*paddr = 0;
 
-	switch (machdep->flags & (VM_L2_64K|VM_L3_64K|VM_L3_4K|VM_L4_4K|VM_L2_16K|VM_L3_16K|VM_L4_16K))
+	switch (machdep->flags & (VM_L2_64K|VM_L3_64K|VM_L3_4K|VM_L4_4K|VM_L2_16K|VM_L3_16K|VM_L4_16K|VM_L5_4K))
 	{
 	case VM_L2_64K:
 		return arm64_vtop_2level_64k(user_pgd, uvaddr, paddr, verbose);
@@ -1907,6 +1949,8 @@ arm64_uvtop(struct task_context *tc, ulong uvaddr, physaddr_t *paddr, int verbos
 		return arm64_vtop_3level_4k(user_pgd, uvaddr, paddr, verbose);
 	case VM_L4_4K:
 		return arm64_vtop_4level_4k(user_pgd, uvaddr, paddr, verbose);
+	case VM_L5_4K:
+		return arm64_vtop_5level_4k(user_pgd, uvaddr, paddr, verbose);
 	case VM_L2_16K:
 		return arm64_vtop_2level_16k(user_pgd, uvaddr, paddr, verbose);
 	case VM_L3_16K:
@@ -1918,12 +1962,23 @@ arm64_uvtop(struct task_context *tc, ulong uvaddr, physaddr_t *paddr, int verbos
 	}
 }
 
-#define PTE_ADDR_LOW   ((((1UL) << (48 - machdep->pageshift)) - 1) << machdep->pageshift)
-#define PTE_ADDR_HIGH  ((0xfUL) << 12)
-#define PTE_ADDR_HIGH_SHIFT 36
-#define PTE_TO_PHYS(pteval)  (machdep->max_physmem_bits == 52 ? \
-	(((pteval & PTE_ADDR_LOW) | ((pteval & PTE_ADDR_HIGH) << PTE_ADDR_HIGH_SHIFT))) : (pteval & PTE_ADDR_LOW))
+#define PTE_ADDR_LOW   ((((1UL) << (50 - machdep->pageshift)) - 1) << machdep->pageshift)
+#define PTE_ADDR_HIGH  (PAGESIZE() == 65536 ? ((0xfUL) << 12) : ((0x3UL) << 8))
+#define PTE_ADDR_HIGH_SHIFT (PAGESIZE() == 65536 ? 36 : 42)
 
+#define PTE_MAYBE_SHARED (machdep->machspec->lpa2_is_enabled ? 0 : PTE_SHARED)
+
+static ulong PTE_TO_PHYS(ulong pteval)
+{
+	if (machdep->max_physmem_bits == 52) {
+		pteval &= ~PTE_MAYBE_SHARED;
+		return (pteval & PTE_ADDR_LOW) | ((pteval & PTE_ADDR_HIGH) << PTE_ADDR_HIGH_SHIFT);
+	} else
+		return pteval & PTE_ADDR_LOW;
+}
+
+#define P4D_TYPE_MASK   3
+#define P4D_TYPE_SECT   1
 #define PUD_TYPE_MASK   3
 #define PUD_TYPE_SECT   1
 #define PMD_TYPE_MASK   3
@@ -2447,6 +2502,106 @@ arm64_vtop_4level_4k(ulong pgd, ulong vaddr, physaddr_t *paddr, int verbose)
 	pte_base = (ulong *)PTOV(PTE_TO_PHYS(pmd_val));
 	FILL_PTBL(pte_base, KVADDR, PTRS_PER_PTE_L4_4K * sizeof(ulong));
 	pte_ptr = pte_base + (((vaddr) >> machdep->pageshift) & (PTRS_PER_PTE_L4_4K - 1));
+	pte_val = ULONG(machdep->ptbl + PAGEOFFSET(pte_ptr));
+	if (verbose)
+		fprintf(fp, "   PTE: %lx => %lx\n", (ulong)pte_ptr, pte_val);
+	if (!pte_val)
+		goto no_page;
+
+	if (pte_val & PTE_VALID) {
+		*paddr = PTE_TO_PHYS(pte_val) + PAGEOFFSET(vaddr);
+		if (verbose) {
+			fprintf(fp, "  PAGE: %lx  %s\n\n", PAGEBASE(*paddr),
+				IS_ZEROPAGE(PAGEBASE(*paddr)) ? "(ZERO PAGE)" : "");
+			arm64_translate_pte(pte_val, 0, 0);
+		}
+	} else {
+		if (IS_UVADDR(vaddr, NULL))
+			*paddr = pte_val;
+		if (verbose) {
+			fprintf(fp, "\n");
+			arm64_translate_pte(pte_val, 0, 0);
+		}
+		goto no_page;
+	}
+
+	return TRUE;
+no_page:
+	return FALSE;
+}
+
+static int
+arm64_vtop_5level_4k(ulong pgd, ulong vaddr, physaddr_t *paddr, int verbose)
+{
+	ulong *pgd_base, *pgd_ptr, pgd_val;
+	ulong *p4d_base, *p4d_ptr, p4d_val;
+	ulong *pud_base, *pud_ptr, pud_val;
+	ulong *pmd_base, *pmd_ptr, pmd_val;
+	ulong *pte_base, *pte_ptr, pte_val;
+
+	if (verbose)
+		fprintf(fp, "PAGE DIRECTORY: %lx\n", pgd);
+
+	pgd_base = (ulong *)pgd;
+	FILL_PGD(pgd_base, KVADDR, PTRS_PER_PGD_L5_4K * sizeof(ulong));
+	pgd_ptr = pgd_base + (((vaddr) >> PGDIR_SHIFT_L5_4K) & (machdep->ptrs_per_pgd - 1));
+	pgd_val = ULONG(machdep->pgd + PGDIR_OFFSET_L5_4K(pgd_ptr));
+	if (verbose)
+		fprintf(fp, "   PGD: %lx => %lx\n", (ulong)pgd_ptr, pgd_val);
+	if (!pgd_val)
+		goto no_page;
+
+	p4d_base = (ulong *)PTOV(PTE_TO_PHYS(pgd_val));
+	FILL_P4D(p4d_base, KVADDR, PTRS_PER_P4D_L5_4K * sizeof(ulong));
+	p4d_ptr = p4d_base + (((vaddr) >> P4D_SHIFT_L5_4K) & (PTRS_PER_P4D_L5_4K - 1));
+	p4d_val = ULONG(machdep->machspec->p4d + PAGEOFFSET(p4d_ptr));
+	if (verbose)
+		fprintf(fp, "   P4D: %lx => %lx\n", (ulong)p4d_ptr, p4d_val);
+	if (!p4d_val)
+		goto no_page;
+
+	pud_base = (ulong *)PTOV(PTE_TO_PHYS(p4d_val));
+	FILL_PUD(pud_base, KVADDR, PTRS_PER_PUD_L5_4K * sizeof(ulong));
+	pud_ptr = pud_base + (((vaddr) >> PUD_SHIFT_L5_4K) & (PTRS_PER_PUD_L5_4K - 1));
+	pud_val = ULONG(machdep->pud + PAGEOFFSET(pud_ptr));
+	if (verbose)
+		fprintf(fp, "   PUD: %lx => %lx\n", (ulong)pud_ptr, pud_val);
+	if (!pud_val)
+		goto no_page;
+
+	if ((pud_val & PUD_TYPE_MASK) == PUD_TYPE_SECT) {
+		ulong sectionbase = PTE_TO_PHYS(pud_val & SECTION_PAGE_MASK_1GB);
+		if (verbose) {
+			fprintf(fp, "  PAGE: %lx  (1GB)\n\n", sectionbase);
+			arm64_translate_pte(pud_val, 0, 0);
+		}
+		*paddr = sectionbase + (vaddr & ~SECTION_PAGE_MASK_1GB);
+		return TRUE;
+	}
+
+	pmd_base = (ulong *)PTOV(PTE_TO_PHYS(pud_val));
+	FILL_PMD(pmd_base, KVADDR, PTRS_PER_PMD_L5_4K * sizeof(ulong));
+	pmd_ptr = pmd_base + (((vaddr) >> PMD_SHIFT_L5_4K) & (PTRS_PER_PMD_L5_4K - 1));
+	pmd_val = ULONG(machdep->pmd + PAGEOFFSET(pmd_ptr));
+	if (verbose)
+		fprintf(fp, "   PMD: %lx => %lx\n", (ulong)pmd_ptr, pmd_val);
+	if (!pmd_val)
+		goto no_page;
+
+	if ((pmd_val & PMD_TYPE_MASK) == PMD_TYPE_SECT) {
+		ulong sectionbase = PTE_TO_PHYS(pmd_val & SECTION_PAGE_MASK_2MB);
+		if (verbose) {
+			fprintf(fp, "  PAGE: %lx  (2MB%s)\n\n", sectionbase,
+				IS_ZEROPAGE(sectionbase) ? ", ZERO PAGE" : "");
+			arm64_translate_pte(pmd_val, 0, 0);
+		}
+		*paddr = sectionbase + (vaddr & ~SECTION_PAGE_MASK_2MB);
+		return TRUE;
+	}
+
+	pte_base = (ulong *)PTOV(PTE_TO_PHYS(pmd_val));
+	FILL_PTBL(pte_base, KVADDR, PTRS_PER_PTE_L5_4K * sizeof(ulong));
+	pte_ptr = pte_base + (((vaddr) >> machdep->pageshift) & (PTRS_PER_PTE_L5_4K - 1));
 	pte_val = ULONG(machdep->ptbl + PAGEOFFSET(pte_ptr));
 	if (verbose)
 		fprintf(fp, "   PTE: %lx => %lx\n", (ulong)pte_ptr, pte_val);
@@ -5032,6 +5187,25 @@ arm64_set_va_bits_by_tcr(void)
 	}
 
 	return FALSE;
+}
+
+static void
+arm64_get_lpa2_is_enabled(void)
+{
+	/*
+	 * Kernel image supports LPA2 with 4K or 16K page and 52 VA bits, but
+	 * where the actual number of VA bits may be downgraded during boot
+	 * depending on hardware capability.
+	 *
+	 * If hardware doesn't support LPA2, lpa2_is_enabled needs to be
+	 * set to 0.
+	 */
+	if (machdep->machspec->CONFIG_ARM64_VA_BITS == 52 && machdep->pageshift < 16) {
+		if (machdep->machspec->VA_BITS_ACTUAL < 52)
+			machdep->machspec->lpa2_is_enabled = 0;
+		else
+			machdep->machspec->lpa2_is_enabled = 1;
+	}
 }
 
 static void 

@@ -3304,6 +3304,29 @@ typedef signed int s32;
 #define PGDIR_OFFSET_48VA(X) (((ulong)(X)) & (PGDIR_SIZE_48VA - 1))
 
 /*
+ * 5-levels / 4K pages
+ * 52-bit VA
+ */
+#define PTRS_PER_PGD_L5_4K   ((1UL) << (52 - 48))
+#define PTRS_PER_P4D_L5_4K   (512)
+#define PTRS_PER_PUD_L5_4K   (512)
+#define PTRS_PER_PMD_L5_4K   (512)
+#define PTRS_PER_PTE_L5_4K   (512)
+#define PGDIR_SHIFT_L5_4K    (48)
+#define PGDIR_SIZE_L5_4K     ((1UL) << PGDIR_SHIFT_L5_4K)
+#define PGDIR_MASK_L5_4K     (~(PGDIR_SIZE_L5_4K-1))
+#define P4D_SHIFT_L5_4K      (39)
+#define P4D_SIZE_L5_4K       ((1UL) << P4D_SHIFT_L5_4K)
+#define P4D_MASK_L5_4K       (~(P4D_SIZE_L5_4K-1))
+#define PUD_SHIFT_L5_4K      (30)
+#define PUD_SIZE_L5_4K       ((1UL) << PUD_SHIFT_L5_4K)
+#define PUD_MASK_L5_4K       (~(PUD_SIZE_L5_4K-1))
+#define PMD_SHIFT_L5_4K      (21)
+#define PMD_SIZE_L5_4K       (1UL << PMD_SHIFT_L5_4K)
+#define PMD_MASK_L5_4K       (~(PMD_SIZE_L5_4K-1))
+#define PGDIR_OFFSET_L5_4K(X) (((ulong)(X)) & ((machdep->ptrs_per_pgd * 8) - 1))
+
+/*
  * 2-levels / 16K pages
  * 36-bit VA
  */
@@ -3419,6 +3442,7 @@ typedef signed int s32;
 #define VM_L3_16K     (0x4000)
 #define VM_L2_16K     (0x8000)
 #define VM_L4_16K     (0x10000)
+#define VM_L5_4K      (0x20000)
 
 /*
  * Get kimage_voffset from /dev/crash
@@ -3439,7 +3463,9 @@ typedef signed int s32;
 #define ARM64_PAGE_OFFSET    ((0xffffffffffffffffUL) \
 					<< (machdep->machspec->VA_BITS - 1))
 /* kernels >= v5.4 the kernel VA space is flipped */
-#define ARM64_FLIP_PAGE_OFFSET (-(1UL) << machdep->machspec->VA_BITS)
+#define ARM64_FLIP_PAGE_OFFSET (-(1UL) << ((machdep->machspec->CONFIG_ARM64_VA_BITS != 0) ? \
+			machdep->machspec->CONFIG_ARM64_VA_BITS : \
+			machdep->machspec->VA_BITS))
 
 #define ARM64_USERSPACE_TOP  ((1UL) << machdep->machspec->VA_BITS)
 #define ARM64_USERSPACE_TOP_ACTUAL  ((1UL) << machdep->machspec->VA_BITS_ACTUAL)
@@ -3558,7 +3584,20 @@ struct machine_specific {
 	ulong physvirt_offset;
 	ulong struct_page_size;
 	ulong vmemmap;
+	ulong lpa2_is_enabled;
+	char *p4d;
+	ulong last_p4d_read;
 };
+
+#define IS_LAST_P4D_READ(p4d)     ((ulong)(p4d) == machdep->machspec->last_p4d_read)
+
+#define FILL_P4D(P4D, TYPE, SIZE) 					    \
+    if (!IS_LAST_P4D_READ(P4D)) {                                           \
+            readmem((ulonglong)((ulong)(P4D)), TYPE, machdep->machspec->p4d,          \
+                    SIZE, "p4d page", FAULT_ON_ERROR);                      \
+            machdep->machspec->last_p4d_read = (ulong)(P4D);                          \
+    }
+
 
 struct arm64_stackframe {
         unsigned long fp;
