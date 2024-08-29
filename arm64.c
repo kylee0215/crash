@@ -441,10 +441,16 @@ arm64_init(int when)
 			break;
 
 		case 16384:
-			if (machdep->machspec->VA_BITS == 48) {
+			if (machdep->machspec->VA_BITS > PGDIR_SHIFT_L4_16K) {
 				machdep->flags |= VM_L4_16K;
-				if (!machdep->ptrs_per_pgd)
-					machdep->ptrs_per_pgd = PTRS_PER_PGD_L4_16K;
+				if (!machdep->ptrs_per_pgd) {
+					if (machdep->machspec->VA_BITS == 52)
+						machdep->ptrs_per_pgd = PTRS_PER_PGD_L4_16K_52;
+					else if (machdep->machspec->VA_BITS == 48)
+						machdep->ptrs_per_pgd = PTRS_PER_PGD_L4_16K_48;
+					else
+						error(FATAL, "wrong VA_BITS for 16K page.");
+				}
 				if ((machdep->pgd =
 				    (char *)malloc(machdep->ptrs_per_pgd * 8)) == NULL)
 					error(FATAL, "cannot malloc pgd space.");
@@ -457,8 +463,7 @@ arm64_init(int when)
 				if ((machdep->ptbl =
 				    (char *)malloc(PTRS_PER_PTE_L4_16K * 8)) == NULL)
 					error(FATAL, "cannot malloc ptbl space.");
-			}
-			else if (machdep->machspec->VA_BITS == 47) {
+			} else if (machdep->machspec->VA_BITS == 47) {
 				machdep->flags |= VM_L3_16K;
 				if (!machdep->ptrs_per_pgd)
 					machdep->ptrs_per_pgd = PTRS_PER_PGD_L3_16K;
@@ -485,7 +490,7 @@ arm64_init(int when)
 				machdep->pmd = NULL;  /* not used */
 				machdep->pud = NULL;  /* not used */
 			} else {
-				error(FATAL, "Do not support 52 bits, 4-level for 16K page now.");
+				error(FATAL, "Wrong VA_BITS for 16K page.");
 			}
 			machdep->machspec->p4d = NULL; /* not used */
 			break;
@@ -2283,8 +2288,12 @@ arm64_vtop_4level_16k(ulong pgd, ulong vaddr, physaddr_t *paddr, int verbose)
 		fprintf(fp, "PAGE DIRECTORY: %lx\n", pgd);
 
 	pgd_base = (ulong *)pgd;
-	FILL_PGD(pgd_base, KVADDR, PTRS_PER_PGD_L4_16K * sizeof(ulong));
-	pgd_ptr = pgd_base + (((vaddr) >> PGDIR_SHIFT_L4_16K) & (PTRS_PER_PGD_L4_16K - 1));
+	FILL_PGD(pgd_base, KVADDR, machdep->ptrs_per_pgd * sizeof(ulong));
+	/*
+	 * We need to use machdep->ptrs_per_pgd to mask vaddr instead of using macro, because
+	 * 48-bits and 52-bits have different size of ptrs_per_pgd.
+	 */
+	pgd_ptr = pgd_base + (((vaddr) >> PGDIR_SHIFT_L4_16K) & (machdep->ptrs_per_pgd - 1));
 	pgd_val = ULONG(machdep->pgd + PGDIR_OFFSET_L4_16K(pgd_ptr));
 	if (verbose)
 		fprintf(fp, "   PGD: %lx => %lx\n", (ulong)pgd_ptr, pgd_val);

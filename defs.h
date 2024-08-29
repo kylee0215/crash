@@ -3354,9 +3354,10 @@ typedef signed int s32;
 
 /*
  * 4-levels / 16K pages
- * 48-bit VA
+ * 48-bit, 52-bit VA
  */
-#define PTRS_PER_PGD_L4_16K   ((1UL) << (48 - 47))
+#define PTRS_PER_PGD_L4_16K_48   ((1UL) << (48 - 47)) // 48-bit VA
+#define PTRS_PER_PGD_L4_16K_52   ((1UL) << (52 - 47)) // 52-bit VA
 #define PTRS_PER_PUD_L4_16K   (2048)
 #define PTRS_PER_PMD_L4_16K   (2048)
 #define PTRS_PER_PTE_L4_16K   (2048)
