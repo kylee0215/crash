@@ -5220,11 +5220,22 @@ arm64_get_lpa2_is_enabled(void)
 static void 
 arm64_calc_VA_BITS(void)
 {
-	int bitval;
+	int bitval, ret;
 	struct syment *sp;
 	ulong vabits_actual, value;
+	char *string;
 
-	arm64_get_vmcoreinfo(&machdep->machspec->CONFIG_ARM64_VA_BITS, "NUMBER(VA_BITS)", NUM_DEC);
+	if (!machdep->machspec->CONFIG_ARM64_VA_BITS) {
+		if (arm64_get_vmcoreinfo(&value, "NUMBER(VA_BITS)", NUM_DEC)) {
+			machdep->machspec->CONFIG_ARM64_VA_BITS = value;
+		} else if (kt->ikconfig_flags & IKCONFIG_AVAIL) {
+			if ((ret = get_kernel_config("CONFIG_ARM64_VA_BITS",
+					&string)) == IKCONFIG_STR) {
+				machdep->machspec->CONFIG_ARM64_VA_BITS = atol(string);
+				free(string);
+			}
+		}
+	}
 
 	if (kernel_symbol_exists("vabits_actual")) {
 		if (pc->flags & PROC_KCORE) {
